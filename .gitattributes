@@ -1,0 +1,2 @@
+**/nvngx_dlss.dll filter=lfs diff=lfs merge=lfs -text
+**/nvngx_dlssnr.dll filter=lfs diff=lfs merge=lfs -text
