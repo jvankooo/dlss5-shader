@@ -4,7 +4,7 @@ DLSS5 Shader for Uncapped
 
 ## Install
 
-1. Copy the entire contents of this repo into your Uncapped install folder (the same folder as `Uncapped.exe`), merging it in on top.
+1. Copy the entire contents of the [`dlss5_files`](dlss5_files) folder into your Uncapped install folder (the same folder as `Uncapped.exe`), merging it in on top.
 2. Launch Uncapped.
 3. Open Settings → **Post-processing** — you should see **RenoDX DLSS5** listed there. Enable it.
 
