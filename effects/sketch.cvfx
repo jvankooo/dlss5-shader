@@ -1,0 +1,81 @@
+//! name: Pencil Sketch
+//! description: Pencil outlines and cross-hatched shading on paper.
+//! pass: softH  scale=0.5
+//! pass: softV  scale=0.5
+//! pass: composite
+
+uniform float PencilLine   : default=0.9, min=0.0, max=1.0, label="Outlines";
+uniform float PencilHatch  : default=0.8, min=0.0, max=1.0, label="Hatching";
+uniform float PencilPitch  : default=7.0, min=4.0, max=20.0, label="Hatch spacing";
+uniform float PencilColour : default=0.0, min=0.0, max=1.0, label="Coloured pencil";
+uniform float3 PencilInk   : default=(0.15,0.15,0.18), min=0.0, max=1.0, widget=color, label="Pencil";
+uniform float3 PencilPaper : default=(0.97,0.95,0.9), min=0.0, max=1.0, widget=color, label="Paper";
+
+// Sizes are in 1080p pixels, so a look holds at 1440p and 4K.
+float sizeScale() { return max(1.0, resolution.y / 1080.0); }
+
+float hatchAt(float2 p, float turn) {
+    float pitch = PencilPitch * sizeScale();
+    float v = p.x * cos(turn) + p.y * sin(turn);
+    float f = abs(frac(v / pitch) - 0.5) * pitch;
+    float thick = sizeScale();
+    return 1.0 - smoothstep(0.7 * thick, 1.7 * thick, f);
+}
+
+float4 softH(float2 uv) {
+    float px = ddx(uv.x);
+    float sum = 0.0;
+    float wsum = 0.0;
+    for (int k = -4; k <= 4; ++k) {
+        float w = exp(-float(k * k) / 8.0);
+        sum += luminance(sample_input(uv + float2(px * float(k), 0.0)).rgb) * w;
+        wsum += w;
+    }
+    sum /= wsum;
+    return float4(sum, sum, sum, 1.0);
+}
+
+float4 softV(float2 uv) {
+    float px = ddy(uv.y);
+    float sum = 0.0;
+    float wsum = 0.0;
+    for (int k = -4; k <= 4; ++k) {
+        float w = exp(-float(k * k) / 8.0);
+        sum += sample_pass(softH, uv + float2(0.0, px * float(k))).r * w;
+        wsum += w;
+    }
+    sum /= wsum;
+    return float4(sum, sum, sum, 1.0);
+}
+
+float4 composite(float2 uv) {
+    float3 src = sample_input(uv).rgb;
+    float l = luminance(src);
+
+    // The classic darkroom trick: a pixel divided by its blurred surroundings
+    // is white wherever it is flat and dark just beside an edge.
+    float around = sample_pass(softV, uv).r;
+    float dodge = saturate((l + 0.05) / (around + 0.05));
+    // Dividing finds detail; the gradient finds outlines between areas that
+    // are both fairly dark, which dividing alone leaves faint.
+    float2 o = texel * 1.5 * sizeScale();
+    float3 gx = sample_input(uv + float2(o.x, 0.0)).rgb - sample_input(uv - float2(o.x, 0.0)).rgb;
+    float3 gy = sample_input(uv + float2(0.0, o.y)).rgb - sample_input(uv - float2(0.0, o.y)).rgb;
+    float outline = smoothstep(0.07, 0.28, sqrt(dot(gx, gx) + dot(gy, gy))) * PencilLine;
+    float pencil = (1.0 - smoothstep(0.65, 0.95, dodge)) * PencilLine;
+
+    // Darker areas pick up more directions, as a hand would add them. Judged
+    // a little brighter than they are: most games are darker than paper.
+    float2 p = uv * resolution;
+    float shade = pow(saturate(around), 0.75);
+    float hatch = hatchAt(p, 0.7854) * smoothstep(0.65, 0.5, shade) * 0.45;
+    hatch = max(hatch, hatchAt(p, -0.7854) * smoothstep(0.45, 0.3, shade) * 0.7);
+    hatch = max(hatch, hatchAt(p, 0.1) * smoothstep(0.28, 0.15, shade) * 0.9);
+    hatch = max(hatch, smoothstep(0.12, 0.02, shade) * 0.55);
+
+    float dark = saturate(max(max(pencil, outline), hatch * PencilHatch));
+    float3 vivid = src / max(max(src.r, max(src.g, src.b)), 0.05);
+    float3 page = PencilPaper * lerp(float3(1.0, 1.0, 1.0), lerp(float3(1.0, 1.0, 1.0), vivid, 0.6), PencilColour);
+    float3 lead = lerp(PencilInk, src * 0.5, PencilColour);
+    return float4(saturate(lerp(page, lead, dark)), 1.0);
+}

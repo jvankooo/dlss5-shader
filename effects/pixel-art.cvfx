@@ -1,0 +1,46 @@
+//! name: Pixel Art
+//! description: Chunky pixels, a limited palette and ordered dithering.
+
+uniform int   ArtRows   : default=224, min=64, max=540, label="Rows of pixels";
+uniform int   ArtLevels : default=10,   min=2,  max=32, label="Levels per colour";
+uniform float ArtDither : default=0.5, min=0.0, max=1.0, label="Dithering";
+uniform float ArtColour : default=1.15, min=0.0, max=2.0, label="Colour";
+uniform bool  ArtReduce : default=1,   label="Limit the palette";
+
+float bayer2(float2 a) {
+    a = floor(a);
+    return frac(a.x / 2.0 + a.y * a.y * 0.75);
+}
+float bayer4(float2 a) { return bayer2(a * 0.5) * 0.25 + bayer2(a); }
+float bayer8(float2 a) { return bayer4(a * 0.5) * 0.25 + bayer2(a); }
+
+float4 effect(float2 uv) {
+    // Square pixels: the columns follow from the rows.
+    float rows = float(ArtRows);
+    float2 cells = float2(max(1.0, round(rows * resolution.x / resolution.y)), rows);
+    float2 cell = floor(uv * cells);
+
+    float3 c = float3(0.0, 0.0, 0.0);
+    for (int y = 0; y < 3; ++y) {
+        for (int x = 0; x < 3; ++x) {
+            float2 at = (cell + (float2(float(x), float(y)) + 0.5) / 3.0) / cells;
+            c += sample_input(at).rgb;
+        }
+    }
+    c /= 9.0;
+
+    float g = luminance(c);
+    c = saturate(lerp(float3(g, g, g), c, ArtColour));
+    if (ArtReduce) {
+        float n = float(ArtLevels) - 1.0;
+        float d = (bayer8(cell) - 0.492) * ArtDither;
+        // Greys are quantised by brightness with the colour carried along.
+        // Rounding each channel alone speckles them red, green and blue.
+        float l = max(luminance(c), 0.001);
+        float3 even = c * (floor(l * n + 0.5 + d) / n / l);
+        float3 apart = floor(c * n + 0.5 + d) / n;
+        float sat = max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b));
+        c = lerp(even, apart, smoothstep(0.1, 0.35, sat));
+    }
+    return float4(saturate(c), 1.0);
+}

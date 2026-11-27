@@ -1,0 +1,55 @@
+//! name: Handheld LCD
+//! description: Pixel grid, subpixels and reduced-shade palettes for handheld games.
+//! pass: composite
+
+uniform int    LcdColumns : default=240, min=96, max=640, label="Screen columns";
+uniform int    LcdRows    : default=160, min=96, max=480, label="Screen rows";
+uniform bool   LcdSnap    : default=1,   label="Snap to whole pixels";
+uniform float  LcdGrid    : default=0.35, min=0.0, max=1.0, label="Grid lines";
+uniform float  LcdStripe  : default=0.2, min=0.0, max=1.0, label="Subpixel stripes";
+uniform int    LcdShades  : default=0,   min=0,  max=16, label="Shades (0 = full colour)";
+uniform float3 LcdDark    : default=(0.10,0.16,0.12), min=0.0, max=1.0, widget=color, label="Darkest shade";
+uniform float3 LcdLight   : default=(0.72,0.78,0.52), min=0.0, max=1.0, widget=color, label="Lightest shade";
+uniform float  LcdWash    : default=0.0, min=0.0, max=1.0, label="Unlit screen wash";
+
+float4 composite(float2 uv) {
+    float2 px = float2(ddx(uv.x), ddy(uv.y));
+    float2 cells = float2(float(LcdColumns), float(LcdRows));
+    float2 cellPx = 1.0 / (px * cells);
+    float2 grid = uv * cells;
+    float2 cell = floor(grid);
+    float2 inside = grid - cell;
+
+    // Four taps, so a cell shows what it covers instead of one pixel of it.
+    float2 q = 0.2 / cells;
+    float2 mid = (cell + 0.5) / cells;
+    float3 snapped = (sample_input(mid + q * float2(-1.0, -1.0)).rgb +
+                      sample_input(mid + q * float2( 1.0, -1.0)).rgb +
+                      sample_input(mid + q * float2(-1.0,  1.0)).rgb +
+                      sample_input(mid + q * float2( 1.0,  1.0)).rgb) * 0.25;
+    float3 plain = sample_input(uv).rgb;
+    float3 c = LcdSnap ? snapped : plain;
+
+    if (LcdShades > 1) {
+        float steps = float(LcdShades) - 1.0;
+        float l = floor(luminance(c) * steps + 0.5) / steps;
+        c = lerp(LcdDark, LcdLight, l);
+    }
+    c = lerp(c, c * 0.8 + 0.15, LcdWash);
+
+    // Without three screen pixels per cell a grid is only moire.
+    float room = smoothstep(2.0, 3.5, min(cellPx.x, cellPx.y));
+
+    // One screen pixel per gap, measured in pixels so every gap matches.
+    float2 gap = min(inside, 1.0 - inside) * cellPx;
+    float gridLine = 1.0 - saturate(min(gap.x, gap.y) / 1.0);
+    c *= 1.0 - gridLine * LcdGrid * room;
+
+    // Smooth lobes rather than hard thirds: a cell is rarely a multiple of
+    // three screen pixels wide. The three average to one.
+    float3 phase = (inside.x - float3(0.1667, 0.5, 0.8333)) * 6.2831853;
+    float3 lobes = 1.0 + cos(phase) * 0.6;
+    c *= lerp(float3(1.0, 1.0, 1.0), lobes, LcdStripe * room);
+
+    return float4(saturate(c), 1.0);
+}

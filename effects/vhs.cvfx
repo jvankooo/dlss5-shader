@@ -1,0 +1,89 @@
+//! name: VHS Tape
+//! description: Smeared colour, tape wobble, noise and head-switching at the bottom.
+//! pass: seed     scale=0.05
+//! pass: smearH   scale=0.5
+//! pass: composite
+
+uniform float TapeSmear  : default=0.5,  min=0.0, max=1.0, label="Colour smear";
+uniform float TapeShift  : default=0.4,  min=0.0, max=1.0, label="Colour offset";
+uniform float TapeSoft   : default=0.5,  min=0.0, max=1.0, label="Softness";
+uniform float TapeWobble : default=0.3,  min=0.0, max=1.0, label="Wobble";
+uniform float TapeNoise  : default=0.3,  min=0.0, max=1.0, label="Noise";
+uniform float TapeSwitch : default=0.5,  min=0.0, max=1.0, label="Bottom tear";
+uniform float TapeFade   : default=0.35, min=0.0, max=1.0, label="Faded colour";
+
+// Effects are not told the time, so the picture itself is the clock: a tiny
+// copy of it changes whenever anything moves, and that reseeds the noise. On
+// a still picture the tape is paused.
+float4 seed(float2 uv) { return sample_input(uv); }
+
+float tapeClock() {
+    float s = 0.0;
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            float2 at = (float2(float(x), float(y)) + 0.5) * 0.25;
+            s += dot(sample_pass(seed, at).rgb, float3(17.13, 29.71, 41.37)) * float(1 + x + y * 4);
+        }
+    }
+    return frac(s) * 61.0;
+}
+
+float hash(float2 p, float s) {
+    float3 q = frac(float3(p.xyx) * float3(0.1031, 0.1030, 0.0973) + s * 0.137);
+    q += dot(q, q.yzx + 33.33);
+    return frac((q.x + q.y) * q.z);
+}
+
+// Tape holds colour at a fraction of the luma's bandwidth, and it trails to
+// the right, the way the head scans.
+float4 smearH(float2 uv) {
+    float px = ddx(uv.x);
+    float3 sum = float3(0.0, 0.0, 0.0);
+    float wsum = 0.0;
+    for (int k = -4; k <= 10; ++k) {
+        float f = float(k);
+        float w = exp(-f * f / (f < 0.0 ? 6.0 : 40.0));
+        sum += sample_input(uv - float2(px * f * TapeSmear * 1.6, 0.0)).rgb * w;
+        wsum += w;
+    }
+    return float4(sum / wsum, 1.0);
+}
+
+float4 composite(float2 uv) {
+    float clock = tapeClock();
+    // Sized in 480ths of the picture, so it looks alike at any resolution.
+    float unit = 1.0 / 480.0;
+    float row = floor(uv.y * 480.0);
+
+    float slow = sin(uv.y * 9.0 + clock * 0.7) + sin(uv.y * 23.0 - clock * 1.3) * 0.5;
+    float jitter = hash(float2(row, 3.0), clock) - 0.5;
+    float sway = (slow * 0.5 + jitter) * TapeWobble * unit * 1.2;
+
+    // Where the heads change over: the last few lines skew sideways.
+    float tear = smoothstep(0.965, 1.0, uv.y) * TapeSwitch;
+    sway += tear * (0.06 + 0.06 * (hash(float2(row, 7.0), clock) - 0.5));
+    float2 at = uv + float2(sway, 0.0);
+
+    float soft = unit * TapeSoft * 0.8;
+    float y = luminance(sample_input(at).rgb) * 0.4 +
+              luminance(sample_input(at - float2(soft, 0.0)).rgb) * 0.3 +
+              luminance(sample_input(at + float2(soft, 0.0)).rgb) * 0.3;
+
+    float2 shift = float2(TapeShift * unit * 2.0, TapeShift * unit);
+    float3 colour = sample_pass(smearH, at - shift).rgb;
+    float3 chroma = colour - luminance(colour);
+    float3 c = y + chroma * (1.0 - TapeFade * 0.5);
+
+    float2 speck = float2(floor(uv.x * 480.0 * resolution.x / resolution.y), row);
+    c += (hash(speck, clock) - 0.5) * TapeNoise * 0.22;
+    // Dropouts: a short white streak on the odd line.
+    float streakLine = step(0.993, hash(float2(row, 11.0), clock));
+    float streakAt = hash(float2(row, 13.0), clock);
+    float streak = streakLine * step(abs(uv.x - streakAt), 0.04) *
+                   step(0.4, hash(float2(floor(speck.x / 3.0), row), clock + 1.0));
+    c += streak * TapeNoise * 0.6;
+    c += tear * (hash(speck + 17.0, clock) - 0.4) * 0.6;
+
+    c = c * (1.0 - TapeFade * 0.15) + TapeFade * 0.06;
+    return float4(saturate(c), 1.0);
+}

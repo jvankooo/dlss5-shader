@@ -1,0 +1,111 @@
+//! name: Capture Cleanup
+//! description: Undoes capture-card damage -- washed-out range, colour bleed, banding.
+//! pass: chromaH
+//! pass: chromaV
+//! pass: finish
+
+uniform bool  ExpandRange : default=0,   label="Expand limited range (16-235)";
+uniform float ChromaClean : default=0.6, min=0.0, max=1.0, label="Colour bleed and noise";
+uniform float ChromaReach : default=1.0, min=0.5, max=3.0, label="Colour reach (raise when upscaling)";
+uniform float Deband      : default=0.5, min=0.0, max=1.0, label="Banding removal";
+uniform float DebandReach : default=12.0, min=4.0, max=32.0, label="Banding reach";
+
+// Sizes are in 1080p pixels, so a look holds at 1440p and 4K.
+float sizeScale() { return max(1.0, resolution.y / 1080.0); }
+
+float3 toYcc(float3 c) {
+    float y = luminance(c);
+    return float3(y, (c.b - y) / 1.8556, (c.r - y) / 1.5748);
+}
+
+float3 toRgb(float3 c) {
+    float r = c.x + 1.5748 * c.z;
+    float b = c.x + 1.8556 * c.y;
+    float g = (c.x - 0.2126 * r - 0.0722 * b) / 0.7152;
+    return float3(r, g, b);
+}
+
+// Capture cards deliver colour at half resolution or less, luma at full. So
+// the colour is blurred, but only between pixels of similar luma: the sharp
+// plane decides where the soft one is allowed to spread.
+float3 chromaTap(float3 tap, float y0, float d, inout float wsum) {
+    float3 ycc = toYcc(tap);
+    float dy = (ycc.x - y0) / 0.06;
+    float w = exp(-d * d / 4.5 - dy * dy);
+    wsum += w;
+    return float3(0.0, ycc.yz) * w;
+}
+
+float4 chromaH(float2 uv) {
+    float px = ddx(uv.x) * ChromaReach * sizeScale();
+    float3 base = sample_input(uv).rgb;
+    float3 ycc = toYcc(base);
+    float3 sum = float3(0.0, ycc.yz);
+    float wsum = 1.0;
+    for (int k = 1; k <= 4; ++k) {
+        float d = float(k);
+        sum += chromaTap(sample_input(uv + float2(px * d, 0.0)).rgb, ycc.x, d, wsum);
+        sum += chromaTap(sample_input(uv - float2(px * d, 0.0)).rgb, ycc.x, d, wsum);
+    }
+    float3 clean = toRgb(float3(ycc.x, sum.yz / wsum));
+    return float4(lerp(base, clean, ChromaClean), 1.0);
+}
+
+float4 chromaV(float2 uv) {
+    float px = ddy(uv.y) * ChromaReach * sizeScale();
+    // Luma comes from the original picture so it never picks up rounding.
+    float y0 = luminance(sample_input(uv).rgb);
+    float3 base = sample_pass(chromaH, uv).rgb;
+    float3 sum = float3(0.0, toYcc(base).yz);
+    float wsum = 1.0;
+    for (int k = 1; k <= 4; ++k) {
+        float d = float(k);
+        sum += chromaTap(sample_pass(chromaH, uv + float2(0.0, px * d)).rgb, y0, d, wsum);
+        sum += chromaTap(sample_pass(chromaH, uv - float2(0.0, px * d)).rgb, y0, d, wsum);
+    }
+    float3 clean = toRgb(float3(y0, sum.yz / wsum));
+    return float4(lerp(base, clean, ChromaClean), 1.0);
+}
+
+// Interleaved gradient noise: an ordered-looking but pattern-free dither.
+float ditherAt(float2 p) {
+    return frac(52.9829189 * frac(dot(p, float2(0.06711056, 0.00583715))));
+}
+
+float4 finish(float2 uv) {
+    float2 px = float2(ddx(uv.x), ddy(uv.y));
+    float2 pos = floor(uv / px);
+    float3 base = sample_pass(chromaV, uv).rgb;
+    float noise = ditherAt(pos);
+
+    // A band is a step of a code or two between flat areas. Average a ring,
+    // rotated per pixel so its own shape does not show, and use the average
+    // only where nothing on the ring is further off than a band could be.
+    float turn = noise * 6.2831853;
+    float2 a = float2(cos(turn), sin(turn));
+    float3 sum = base;
+    float3 worst = float3(0.0, 0.0, 0.0);
+    for (int k = 0; k < 8; ++k) {
+        float2 dir = a * DebandReach * sizeScale() * (k < 4 ? 1.0 : 0.5);
+        float3 tap = sample_pass(chromaV, uv + dir * px).rgb;
+        worst = max(worst, abs(tap - base));
+        sum += tap;
+        a = float2(-a.y, a.x);
+        if (k == 3) a = float2(a.x - a.y, a.x + a.y) * 0.70710678;
+    }
+    float limit = 2.0 / 255.0 + Deband * 3.0 / 255.0;
+    float3 off = saturate((worst - limit) * 255.0 / 2.0);
+    float flat_ = 1.0 - max(off.r, max(off.g, off.b));
+    float mixIn = flat_ * step(0.001, Deband);
+    float3 c = lerp(base, sum / 9.0, mixIn);
+
+    if (ExpandRange) c = (c * 255.0 - 16.0) / 219.0;
+
+    // Rounding the smoothed value back to 8 bits would redraw the band.
+    float spread = max(mixIn, ExpandRange ? 1.0 : 0.0);
+    // It fades out at either end, where it would dirty pure black and white.
+    c = saturate(c);
+    float3 ends = saturate(min(c, 1.0 - c) * 255.0);
+    c += (ditherAt(pos + 5.588238) - 0.5) / 255.0 * spread * ends;
+    return float4(saturate(c), 1.0);
+}

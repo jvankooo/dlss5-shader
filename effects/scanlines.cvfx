@@ -1,0 +1,29 @@
+//! name: Scanlines
+//! description: Plain dark lines with no curvature or mask. Cheap.
+
+uniform int   LineCount  : default=360, min=120, max=1080, label="Lines";
+uniform float LineDepth  : default=0.4, min=0.0, max=1.0, label="Strength";
+uniform float LineSoft   : default=0.6, min=0.0, max=1.0, label="Softness";
+uniform float LineBright : default=0.5, min=0.0, max=1.0, label="Show through in highlights";
+uniform bool  LineTurn   : default=0,   label="Vertical lines";
+uniform float LineGain   : default=0.8, min=0.0, max=1.0, label="Brightness compensation";
+
+float4 effect(float2 uv) {
+    float3 c = sample_input(uv).rgb;
+    float at = LineTurn ? uv.x * resolution.x / resolution.y : uv.y;
+    float phase = frac(at * float(LineCount));
+
+    // 0 in the middle of a line, 1 in the gap between two.
+    float wave = 0.5 + 0.5 * cos(phase * 6.2831853);
+    float hard = smoothstep(0.45, 0.55, wave);
+    float gapShape = lerp(hard, wave, LineSoft);
+
+    // Less than two screen pixels per line cannot show one.
+    float room = smoothstep(1.5, 2.5, resolution.y / float(LineCount));
+    float depth = LineDepth * room;
+    depth *= 1.0 - LineBright * saturate(luminance(c));
+
+    c *= 1.0 - gapShape * depth;
+    c *= lerp(1.0, 1.0 / max(1.0 - depth * 0.5, 0.5), LineGain);
+    return float4(saturate(c), 1.0);
+}

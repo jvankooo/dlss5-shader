@@ -1,0 +1,92 @@
+//! name: Edge Smooth
+//! description: Smooths jagged edges by blurring along them, never across.
+//! pass: tensor
+//! pass: smooth
+//! pass: composite
+
+uniform float EdgeAmount    : default=0.8,  min=0.0,  max=1.0, label="Strength";
+uniform float EdgeThreshold : default=0.06, min=0.01, max=0.3, label="Ignore edges fainter than";
+uniform float EdgeReach     : default=1.0,  min=0.5,  max=3.0, label="Reach (raise when upscaling)";
+
+// Sizes are in 1080p pixels, so a look holds at 1440p and 4K.
+float sizeScale() { return max(1.0, resolution.y / 1080.0); }
+
+// The local edge direction is a structure tensor: products of the luma
+// gradient, averaged over a neighbourhood. Averaging the products is what
+// lets one stair-step see the slope of the whole staircase. Values are stored
+// as square roots because pass targets are 8 bit and the products are tiny.
+float4 packTensor(float3 t) {
+    return float4(sqrt(saturate(t.x)), sqrt(saturate(t.y)),
+                  sign(t.z) * sqrt(min(abs(t.z), 1.0)) * 0.5 + 0.5, 1.0);
+}
+
+float3 unpackTensor(float4 p) {
+    float z = p.z * 2.0 - 1.0;
+    // 0.5 is not representable in 8 bits, so the nearest codes mean "none".
+    z = abs(z) < 0.006 ? 0.0 : z;
+    return float3(p.x * p.x, p.y * p.y, z * abs(z));
+}
+
+float lumaAt(float2 uv) { return luminance(sample_input(uv).rgb); }
+
+float4 tensor(float2 uv) {
+    float2 px = float2(ddx(uv.x), ddy(uv.y)) * EdgeReach * sizeScale();
+    float nw = lumaAt(uv + px * float2(-1.0, -1.0));
+    float n  = lumaAt(uv + px * float2( 0.0, -1.0));
+    float ne = lumaAt(uv + px * float2( 1.0, -1.0));
+    float w  = lumaAt(uv + px * float2(-1.0,  0.0));
+    float e  = lumaAt(uv + px * float2( 1.0,  0.0));
+    float sw = lumaAt(uv + px * float2(-1.0,  1.0));
+    float s  = lumaAt(uv + px * float2( 0.0,  1.0));
+    float se = lumaAt(uv + px * float2( 1.0,  1.0));
+    float2 g = float2((ne + 2.0 * e + se) - (nw + 2.0 * w + sw),
+                      (sw + 2.0 * s + se) - (nw + 2.0 * n + ne)) * 0.25;
+    return packTensor(float3(g.x * g.x, g.y * g.y, g.x * g.y));
+}
+
+float4 smooth(float2 uv) {
+    // Whole texels only: the packed values do not survive bilinear filtering.
+    float2 px = float2(ddx(uv.x), ddy(uv.y)) * max(1.0, round(EdgeReach * sizeScale()));
+    float3 sum = float3(0.0, 0.0, 0.0);
+    float wsum = 0.0;
+    for (int y = -2; y <= 2; ++y) {
+        for (int x = -2; x <= 2; ++x) {
+            // A diamond, thirteen reads instead of twenty-five.
+            if (abs(x) + abs(y) > 2) continue;
+            float w = exp(-float(x * x + y * y) / 4.0);
+            sum += unpackTensor(sample_pass(tensor, uv + px * float2(float(x), float(y)))) * w;
+            wsum += w;
+        }
+    }
+    return packTensor(sum / wsum);
+}
+
+float4 composite(float2 uv) {
+    float2 px = float2(ddx(uv.x), ddy(uv.y));
+    float4 base = sample_input(uv);
+    float3 t = unpackTensor(sample_pass(smooth, uv));
+
+    float diff = t.x - t.y;
+    float root = sqrt(diff * diff + 4.0 * t.z * t.z);
+    float strong = 0.5 * (t.x + t.y + root);
+    float coherence = root / max(t.x + t.y, 1e-5);
+
+    // Angle of the gradient; the edge runs at right angles to it.
+    float angle = 0.5 * atan2(2.0 * t.z, diff + 1e-7);
+    float2 along = float2(-sin(angle), cos(angle)) * px * EdgeReach * sizeScale();
+
+    float3 sum = base.rgb;
+    float wsum = 1.0;
+    for (int k = 1; k <= 3; ++k) {
+        float w = exp(-float(k * k) / 4.5);
+        sum += (sample_input(uv + along * float(k)).rgb +
+                sample_input(uv - along * float(k)).rgb) * w;
+        wsum += 2.0 * w;
+    }
+
+    // Corners and texture have no single direction, so coherence drops and
+    // they are left alone.
+    float amount = smoothstep(EdgeThreshold, EdgeThreshold * 2.5, sqrt(strong)) *
+                   smoothstep(0.35, 0.8, coherence) * EdgeAmount;
+    return float4(lerp(base.rgb, sum / wsum, amount), 1.0);
+}

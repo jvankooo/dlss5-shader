@@ -1,0 +1,39 @@
+//! name: Sharpen
+//! description: Adaptive sharpening that backs off at hard edges, so no halos.
+
+uniform float SharpAmount : default=0.5, min=0.0, max=1.0, label="Sharpness";
+uniform float SharpReach  : default=1.0, min=0.5, max=3.0, label="Reach (raise when upscaling)";
+uniform float SharpQuiet  : default=0.3, min=0.0, max=1.0, label="Ignore noise";
+
+// Sizes are in 1080p pixels, so a look holds at 1440p and 4K.
+float sizeScale() { return max(1.0, resolution.y / 1080.0); }
+
+float4 effect(float2 uv) {
+    float2 o = texel * SharpReach * sizeScale();
+    float3 c = sample_input(uv).rgb;
+    float3 n = sample_input(uv - float2(0.0, o.y)).rgb;
+    float3 s = sample_input(uv + float2(0.0, o.y)).rgb;
+    float3 w = sample_input(uv - float2(o.x, 0.0)).rgb;
+    float3 e = sample_input(uv + float2(o.x, 0.0)).rgb;
+
+    float lc = luminance(c);
+    float ln = luminance(n);
+    float ls = luminance(s);
+    float lw = luminance(w);
+    float le = luminance(e);
+    float hi = max(lc, max(max(ln, ls), max(lw, le)));
+    float lo = min(lc, min(min(ln, ls), min(lw, le)));
+
+    // How much room is left before this neighbourhood would clip: strong
+    // contrast has little, so it gets little.
+    float room = sqrt(saturate(min(lo, 1.0 - hi) / max(hi, 0.001)));
+    float quiet = smoothstep(0.0, 0.004 + SharpQuiet * 0.05, hi - lo);
+
+    float detail = lc - (ln + ls + lw + le) * 0.25;
+    float boosted = lc + detail * SharpAmount * 2.5 * lerp(0.25, 1.0, room) * quiet;
+    // Never past the brightest or darkest neighbour by more than a little:
+    // overshoot is what a halo is.
+    float slack = (hi - lo) * 0.15;
+    boosted = clamp(boosted, lo - slack, hi + slack);
+    return float4(saturate(c + (boosted - lc)), 1.0);
+}

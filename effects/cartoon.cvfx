@@ -1,0 +1,94 @@
+//! name: Cartoon
+//! description: Cel shading -- flattened colour, stepped shading and ink outlines.
+//! pass: flatA
+//! pass: flatB
+//! pass: composite
+
+uniform float CelFlatten : default=0.8,  min=0.0, max=1.0, label="Flatten detail";
+uniform int   CelSteps   : default=6,    min=2,   max=16,  label="Shading steps";
+uniform float CelAmount  : default=0.6,  min=0.0, max=1.0, label="Stepped shading";
+uniform float CelColour  : default=1.3,  min=0.0, max=2.0, label="Colour";
+uniform float InkAmount  : default=0.85, min=0.0, max=1.0, label="Outlines";
+uniform float InkDetail  : default=0.55,  min=0.0, max=1.0, label="Outline detail";
+uniform float InkWidth   : default=1.2,  min=0.5, max=4.0, label="Outline width";
+uniform float3 InkColor  : default=(0.05,0.04,0.06), min=0.0, max=1.0, widget=color, label="Outline colour";
+
+// Sizes are in 1080p pixels, so a look holds at 1440p and 4K.
+float sizeScale() { return max(1.0, resolution.y / 1080.0); }
+
+// A bilateral blur: averages neighbours of a similar colour and ignores the
+// rest, so texture goes and edges stay. Two rounds, the second wider.
+float3 flatTap(float3 tap, float3 base, float d2, inout float wsum) {
+    float3 diff = tap - base;
+    float w = exp(-d2 / 8.0 - dot(diff, diff) * 60.0);
+    wsum += w;
+    return tap * w;
+}
+
+float4 flatA(float2 uv) {
+    float2 px = float2(ddx(uv.x), ddy(uv.y));
+    float3 base = sample_input(uv).rgb;
+    float3 sum = float3(0.0, 0.0, 0.0);
+    float wsum = 0.0;
+    for (int y = -2; y <= 2; ++y) {
+        for (int x = -2; x <= 2; ++x) {
+            if (abs(x) + abs(y) > 2) continue; // a diamond: 13 reads, not 25
+            float2 o = float2(float(x), float(y));
+            sum += flatTap(sample_input(uv + o * px * 1.5 * sizeScale()).rgb, base, dot(o, o), wsum);
+        }
+    }
+    return float4(lerp(base, sum / wsum, CelFlatten), 1.0);
+}
+
+float4 flatB(float2 uv) {
+    float2 px = float2(ddx(uv.x), ddy(uv.y));
+    float3 base = sample_pass(flatA, uv).rgb;
+    float3 sum = float3(0.0, 0.0, 0.0);
+    float wsum = 0.0;
+    for (int y = -2; y <= 2; ++y) {
+        for (int x = -2; x <= 2; ++x) {
+            if (abs(x) + abs(y) > 2) continue; // a diamond: 13 reads, not 25
+            float2 o = float2(float(x), float(y));
+            sum += flatTap(sample_pass(flatA, uv + o * px * 2.5 * sizeScale()).rgb, base, dot(o, o), wsum);
+        }
+    }
+    return float4(lerp(base, sum / wsum, CelFlatten), 1.0);
+}
+
+float4 composite(float2 uv) {
+    float2 px = float2(ddx(uv.x), ddy(uv.y));
+    float3 c = sample_pass(flatB, uv).rgb;
+
+    // Steps the brightness only and carries the colour along, with a narrow
+    // ramp between steps so gradients do not crawl.
+    float l = max(luminance(c), 0.001);
+    float n = float(CelSteps);
+    float s = l * n;
+    float base_ = floor(s);
+    float stepped = (base_ + smoothstep(0.35, 0.65, s - base_)) / n;
+    c *= lerp(1.0, stepped / l, CelAmount);
+
+    float g = luminance(c);
+    c = max(lerp(float3(g, g, g), c, CelColour), 0.0);
+
+    // Sobel on colour, so two surfaces of equal brightness still get a line.
+    float2 o = px * InkWidth * sizeScale();
+    float3 nw = sample_pass(flatB, uv + o * float2(-1.0, -1.0)).rgb;
+    float3 nn = sample_pass(flatB, uv + o * float2( 0.0, -1.0)).rgb;
+    float3 ne = sample_pass(flatB, uv + o * float2( 1.0, -1.0)).rgb;
+    float3 ww = sample_pass(flatB, uv + o * float2(-1.0,  0.0)).rgb;
+    float3 ee = sample_pass(flatB, uv + o * float2( 1.0,  0.0)).rgb;
+    float3 sw = sample_pass(flatB, uv + o * float2(-1.0,  1.0)).rgb;
+    float3 ss = sample_pass(flatB, uv + o * float2( 0.0,  1.0)).rgb;
+    float3 se = sample_pass(flatB, uv + o * float2( 1.0,  1.0)).rgb;
+    float3 gx = (ne + 2.0 * ee + se) - (nw + 2.0 * ww + sw);
+    float3 gy = (sw + 2.0 * ss + se) - (nw + 2.0 * nn + ne);
+    float edge = sqrt(dot(gx, gx) + dot(gy, gy));
+    float start = lerp(0.9, 0.12, InkDetail);
+    float ink = smoothstep(start, start * 1.8, edge) * InkAmount;
+    // Only on the darker side of an edge: ink on both sides would swallow
+    // thin bright things whole, and on-screen text is the first to go.
+    float around = luminance(nw + nn + ne + ww + ee + sw + ss + se) / 8.0;
+    ink *= smoothstep(0.05, -0.02, luminance(sample_pass(flatB, uv).rgb) - around);
+    return float4(saturate(lerp(c, InkColor, ink)), 1.0);
+}

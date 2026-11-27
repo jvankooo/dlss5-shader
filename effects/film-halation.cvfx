@@ -1,0 +1,121 @@
+//! name: Film Halation
+//! description: Warm glow around highlights, split toning, soft shoulder and grain.
+//! pass: seed     scale=0.05
+//! pass: bright   scale=0.25
+//! pass: haloH    scale=0.25
+//! pass: haloV    scale=0.25
+//! pass: composite
+
+uniform float  Halation   : default=0.35, min=0.0, max=1.0, label="Halation";
+uniform float  HaloStart  : default=0.65, min=0.2, max=0.95, label="Halation starts at";
+uniform float3 HaloColor  : default=(1.0,0.35,0.15), min=0.0, max=1.0, widget=color, label="Halation colour";
+uniform float  SplitTone  : default=0.2,  min=0.0, max=1.0, label="Split tone";
+uniform float3 ShadeColor : default=(0.2,0.45,0.6), min=0.0, max=1.0, widget=color, label="Shadow colour";
+uniform float3 LightColor : default=(1.0,0.8,0.5), min=0.0, max=1.0, widget=color, label="Highlight colour";
+uniform float  Shoulder   : default=0.3,  min=0.0, max=1.0, label="Soften highlights";
+uniform float  Fade       : default=0.05, min=0.0, max=1.0, label="Faded blacks";
+uniform float  Grain      : default=0.15, min=0.0, max=1.0, label="Grain";
+uniform float  GrainSize  : default=1.5,  min=1.0, max=4.0, label="Grain size";
+
+// Effects are not told the time, so the picture itself seeds the grain: a
+// tiny copy whose values change whenever anything on screen does. Grain runs
+// with the footage and holds still on a still picture.
+float4 seed(float2 uv) { return sample_input(uv); }
+
+float seedValue() {
+    float s = 0.0;
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            float2 at = (float2(float(x), float(y)) + 0.5) * 0.25;
+            float3 c = sample_pass(seed, at).rgb;
+            s += dot(c, float3(17.13, 29.71, 41.37)) * float(1 + x + y * 4);
+        }
+    }
+    return frac(s) * 61.0;
+}
+
+float hash(float2 p, float s) {
+    float3 q = frac(float3(p.xyx) * float3(0.1031, 0.1030, 0.0973) + s * 0.137);
+    q += dot(q, q.yzx + 33.33);
+    return frac((q.x + q.y) * q.z);
+}
+
+float grainAt(float2 p, float s) {
+    float2 i0 = floor(p);
+    float2 f = p - i0;
+    f = f * f * (3.0 - 2.0 * f);
+    float a = hash(i0, s);
+    float b = hash(i0 + float2(1.0, 0.0), s);
+    float c = hash(i0 + float2(0.0, 1.0), s);
+    float d = hash(i0 + float2(1.0, 1.0), s);
+    return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y) - 0.5;
+}
+
+float4 bright(float2 uv) {
+    float2 o = float2(ddx(uv.x), ddy(uv.y)) * 0.25;
+    float3 c = (sample_input(uv + o * float2(-1.0, -1.0)).rgb +
+                sample_input(uv + o * float2( 1.0, -1.0)).rgb +
+                sample_input(uv + o * float2(-1.0,  1.0)).rgb +
+                sample_input(uv + o * float2( 1.0,  1.0)).rgb) * 0.25;
+    float l = luminance(c);
+    float k = smoothstep(HaloStart, min(HaloStart + 0.3, 1.0), l);
+    return float4(c * k, 1.0);
+}
+
+float4 haloH(float2 uv) {
+    float px = ddx(uv.x);
+    float3 sum = float3(0.0, 0.0, 0.0);
+    float wsum = 0.0;
+    for (int k = -9; k <= 9; ++k) {
+        // A tight core with a long tail, closer to light scattering in a
+        // film base than one gaussian.
+        float w = exp(-float(k * k) / 8.0) + 0.35 * exp(-float(k * k) / 60.0);
+        sum += sample_pass(bright, uv + float2(px * float(k), 0.0)).rgb * w;
+        wsum += w;
+    }
+    return float4(sum / wsum, 1.0);
+}
+
+float4 haloV(float2 uv) {
+    float px = ddy(uv.y);
+    float3 sum = float3(0.0, 0.0, 0.0);
+    float wsum = 0.0;
+    for (int k = -9; k <= 9; ++k) {
+        float w = exp(-float(k * k) / 8.0) + 0.35 * exp(-float(k * k) / 60.0);
+        sum += sample_pass(haloH, uv + float2(0.0, px * float(k))).rgb * w;
+        wsum += w;
+    }
+    return float4(sum / wsum, 1.0);
+}
+
+float4 composite(float2 uv) {
+    float2 px = float2(ddx(uv.x), ddy(uv.y));
+    float3 c = sample_input(uv).rgb;
+
+    // Screen blend, so the halo shows on the dark side of an edge and cannot
+    // blow out the highlight it came from.
+    float3 halo = luminance(sample_pass(haloV, uv).rgb) * HaloColor * Halation;
+    c = 1.0 - (1.0 - c) * (1.0 - saturate(halo));
+
+    float l = luminance(c);
+    float3 tint = lerp(ShadeColor, LightColor, smoothstep(0.1, 0.9, l));
+    float tl = max(luminance(tint), 0.05);
+    // Divided by its own brightness the tint moves hue and leaves exposure,
+    // and it eases off at both ends so black and white stay neutral.
+    float3 toned = c * (tint / tl);
+    c = lerp(c, toned, SplitTone * 0.5 * saturate(4.0 * l * (1.0 - l)));
+
+    // Compresses everything above the knee; the peak lands a little under
+    // white as a print's does.
+    float knee = 0.6;
+    float3 over = max(c - knee, 0.0);
+    float3 bent = min(c, knee) + over / (1.0 + over * 1.2);
+    c = lerp(c, bent, Shoulder);
+
+    c = c * (1.0 - Fade * 0.2) + Fade * 0.1;
+
+    // Densest in the midtones, where it is on film.
+    float g = grainAt(uv / px / GrainSize, seedValue());
+    c += g * Grain * 0.25 * (0.35 + 0.65 * saturate(4.0 * l * (1.0 - l)));
+    return float4(saturate(c), 1.0);
+}

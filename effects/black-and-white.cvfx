@@ -1,0 +1,22 @@
+//! name: Black & White
+//! description: Monochrome with a colour-filter mix, contrast and toning.
+
+uniform float  MonoAmount   : default=1.0, min=0.0, max=1.0, label="Strength";
+uniform float3 MonoFilter   : default=(0.3,0.59,0.11), min=0.0, max=1.0, widget=color, label="Channel mix (filter colour)";
+uniform float  MonoContrast : default=0.3, min=0.0, max=1.0, label="Contrast";
+uniform float  MonoBright   : default=0.0, min=-0.5, max=0.5, label="Brightness";
+uniform float3 MonoTone     : default=(1.0,0.85,0.65), min=0.0, max=1.0, widget=color, label="Tone";
+uniform float  MonoToning   : default=0.0, min=0.0, max=1.0, label="Toning (sepia)";
+
+float4 effect(float2 uv) {
+    float3 src = sample_input(uv).rgb;
+    // Any filter colour is normalised, so it changes the mix, not exposure.
+    float3 f = MonoFilter / max(dot(MonoFilter, float3(1.0, 1.0, 1.0)), 0.01);
+    float l = saturate(dot(src, f) + MonoBright);
+    float s = l * l * (3.0 - 2.0 * l);
+    l = lerp(l, s, MonoContrast);
+
+    // White and black stay put; the tone lives in between.
+    float3 t = pow(max(l, 1e-5), 1.0 + (1.0 - MonoTone) * MonoToning * 1.5);
+    return float4(saturate(lerp(src, t, MonoAmount)), 1.0);
+}

@@ -1,0 +1,135 @@
+//! name: CRT Display
+//! description: Scanlines, phosphor mask, glow and curvature for retro consoles.
+//! pass: glowSrc  scale=0.25
+//! pass: glowH    scale=0.25
+//! pass: glowV    scale=0.25
+//! pass: composite
+
+uniform int   ScanCount    : default=240, min=120, max=576, label="Lines (240 for retro, 480 for later)";
+uniform float ScanDepth    : default=0.6, min=0.0, max=1.0, label="Scanlines";
+uniform float BeamBloom    : default=0.5, min=0.0, max=1.0, label="Bright lines widen";
+uniform float SideBlur     : default=0.5, min=0.0, max=2.0, label="Horizontal softness";
+uniform int   MaskKind     : default=1,   min=0,   max=3,   label="Mask: none / grille / slot / dots";
+uniform float MaskDepth    : default=0.35, min=0.0, max=1.0, label="Mask strength";
+uniform int   MaskPixels   : default=1,   min=1,   max=4,   label="Mask size (2 on 4K)";
+uniform float TubeGlow     : default=0.15, min=0.0, max=1.0, label="Glow";
+uniform float TubeCurve    : default=0.15, min=0.0, max=1.0, label="Curvature";
+uniform float TubeCorner   : default=0.2, min=0.0, max=1.0, label="Corner shading";
+uniform float KeepBright   : default=0.8, min=0.0, max=1.0, label="Brightness compensation";
+
+float3 toLight(float3 c) { return pow(max(c, 0.0), float3(2.2, 2.2, 2.2)); }
+float3 toCode(float3 c) { return pow(saturate(c), float3(0.45454545, 0.45454545, 0.45454545)); }
+
+float4 glowSrc(float2 uv) {
+    float2 o = float2(ddx(uv.x), ddy(uv.y)) * 0.25;
+    float3 sum = sample_input(uv + o * float2(-1.0, -1.0)).rgb +
+                 sample_input(uv + o * float2( 1.0, -1.0)).rgb +
+                 sample_input(uv + o * float2(-1.0,  1.0)).rgb +
+                 sample_input(uv + o * float2( 1.0,  1.0)).rgb;
+    return float4(sum * 0.25, 1.0);
+}
+
+float4 glowH(float2 uv) {
+    float px = ddx(uv.x);
+    float3 sum = float3(0.0, 0.0, 0.0);
+    float wsum = 0.0;
+    for (int k = -6; k <= 6; ++k) {
+        float w = exp(-float(k * k) / 18.0);
+        sum += toLight(sample_pass(glowSrc, uv + float2(px * float(k), 0.0)).rgb) * w;
+        wsum += w;
+    }
+    return float4(toCode(sum / wsum), 1.0);
+}
+
+float4 glowV(float2 uv) {
+    float px = ddy(uv.y);
+    float3 sum = float3(0.0, 0.0, 0.0);
+    float wsum = 0.0;
+    for (int k = -6; k <= 6; ++k) {
+        float w = exp(-float(k * k) / 18.0);
+        sum += toLight(sample_pass(glowH, uv + float2(0.0, px * float(k))).rgb) * w;
+        wsum += w;
+    }
+    return float4(toCode(sum / wsum), 1.0);
+}
+
+float2 bend(float2 uv) {
+    float2 c = uv * 2.0 - 1.0;
+    c *= 1.0 + c.yx * c.yx * float2(0.05, 0.07) * TubeCurve * 2.0;
+    return c * 0.5 + 0.5;
+}
+
+// One picture line: three taps across for the softness, averaged with a
+// second row so a line stands for its whole height and not one row of it.
+float3 lineAt(float2 uv, float row, float pxX) {
+    float h = 1.0 / float(ScanCount);
+    float y = (row + 0.5) * h;
+    float o = pxX * SideBlur;
+    float3 sum = float3(0.0, 0.0, 0.0);
+    for (int k = 0; k < 2; ++k) {
+        float yy = y + (k == 0 ? -0.2 : 0.2) * h;
+        sum += toLight(sample_input(float2(uv.x, yy)).rgb) * 0.25;
+        sum += toLight(sample_input(float2(uv.x - o, yy)).rgb) * 0.125;
+        sum += toLight(sample_input(float2(uv.x + o, yy)).rgb) * 0.125;
+    }
+    return sum;
+}
+
+float3 maskAt(float2 p) {
+    float2 cell = floor(p / float(MaskPixels));
+    if (MaskKind == 3) cell.x += floor(fmod(cell.y, 2.0)) * 1.5;
+    float m = floor(fmod(cell.x, 3.0));
+    float3 hit = float3(m == 0.0, m == 1.0, m == 2.0);
+    float3 mask = lerp(float3(1.0, 1.0, 1.0), hit, MaskDepth);
+    if (MaskKind == 2) {
+        // Neighbouring slots are staggered half a slot.
+        float stagger = fmod(floor(cell.x / 3.0), 2.0) * 2.0;
+        float bar = fmod(cell.y + stagger, 4.0) < 1.0 ? 1.0 - MaskDepth * 0.6 : 1.0;
+        mask *= bar;
+    }
+    return MaskKind == 0 ? float3(1.0, 1.0, 1.0) : mask;
+}
+
+float4 composite(float2 uv) {
+    float2 px = float2(ddx(uv.x), ddy(uv.y));
+    float2 p = floor(uv / px);
+    float2 tube = bend(uv);
+
+    // Three lines can reach any one pixel. The brighter a line, the wider
+    // its beam -- which is why white areas on a real tube look solid.
+    float y = tube.y * float(ScanCount) - 0.5;
+    float nearest = floor(y + 0.5);
+    float3 sum = float3(0.0, 0.0, 0.0);
+    float3 wsum = float3(0.0, 0.0, 0.0);
+    for (int k = -1; k <= 1; ++k) {
+        float row = nearest + float(k);
+        float3 c = lineAt(tube, row, px.x);
+        float3 width = lerp(float3(0.22, 0.22, 0.22), float3(0.34, 0.34, 0.34), sqrt(c) * BeamBloom);
+        float d = y - row;
+        float3 w = exp(-(d * d) / (2.0 * width * width));
+        sum += c * w;
+        wsum += w;
+    }
+    float3 c = sum / max(wsum, 1e-4);
+    // Below about three screen pixels a line there is no room to draw one
+    // and it turns into moire, so it fades out instead.
+    float perLine = 1.0 / (px.y * float(ScanCount));
+    float depth = ScanDepth * smoothstep(1.8, 3.0, perLine);
+    c *= lerp(float3(1.0, 1.0, 1.0), min(wsum, 1.0), depth);
+
+    c += toLight(sample_pass(glowV, tube).rgb) * TubeGlow * 0.6;
+    c *= maskAt(p);
+
+    // What the pattern took away on average, given back.
+    float lost = (1.0 - depth * 0.3) * (MaskKind == 0 ? 1.0 : 1.0 - MaskDepth * 0.6667);
+    c *= lerp(1.0, 1.0 / lost, KeepBright);
+
+    float2 d = tube * 2.0 - 1.0;
+    c *= 1.0 - TubeCorner * saturate(dot(d * d, d * d) * 0.5) * 0.8;
+
+    // Outside the curved picture there is only the bezel; one pixel of
+    // blend keeps its edge clean.
+    float2 edge = min(tube, 1.0 - tube) / px;
+    float inside = saturate(min(edge.x, edge.y) + 0.5);
+    return float4(toCode(c) * inside, 1.0);
+}

@@ -1,0 +1,58 @@
+//! name: Oil Paint
+//! description: Brush-dabbed painting (Kuwahara filter). Heavier than most.
+//! pass: paint
+//! pass: composite
+
+uniform float PaintSize   : default=1.5, min=0.5, max=4.0, label="Brush size";
+uniform float PaintAmount : default=1.0, min=0.0, max=1.0, label="Strength";
+uniform float PaintRidge  : default=0.3, min=0.0, max=1.0, label="Brush relief";
+uniform float PaintColour : default=1.15, min=0.0, max=2.0, label="Colour";
+
+// Sizes are in 1080p pixels, so a look holds at 1440p and 4K.
+float sizeScale() { return max(1.0, resolution.y / 1080.0); }
+
+// Four overlapping quadrants, each averaged; the flatter a quadrant, the more
+// of it is used. Edges survive because one side of them always wins. The
+// quadrants share one 5x5 grid, so the middle rows are only read once.
+float4 paint(float2 uv) {
+    float2 px = float2(ddx(uv.x), ddy(uv.y)) * PaintSize * 1.5 * sizeScale();
+    float3 sum[4];
+    float3 sq[4];
+    for (int q = 0; q < 4; ++q) {
+        sum[q] = float3(0.0, 0.0, 0.0);
+        sq[q] = float3(0.0, 0.0, 0.0);
+    }
+    [unroll] for (int y = -2; y <= 2; ++y) {
+        [unroll] for (int x = -2; x <= 2; ++x) {
+            float3 c = sample_input(uv + px * float2(float(x), float(y))).rgb;
+            float3 c2 = c * c;
+            if (x <= 0 && y <= 0) { sum[0] += c; sq[0] += c2; }
+            if (x >= 0 && y <= 0) { sum[1] += c; sq[1] += c2; }
+            if (x <= 0 && y >= 0) { sum[2] += c; sq[2] += c2; }
+            if (x >= 0 && y >= 0) { sum[3] += c; sq[3] += c2; }
+        }
+    }
+    float3 total = float3(0.0, 0.0, 0.0);
+    float wsum = 0.0;
+    [unroll] for (int k = 0; k < 4; ++k) {
+        float3 m = sum[k] / 9.0;
+        float3 v = abs(sq[k] / 9.0 - m * m);
+        // A soft choice: a hard minimum flickers between quadrants in motion.
+        float w = pow(1.0 / (1.0 + (v.r + v.g + v.b) * 400.0), 4.0) + 1e-6;
+        total += m * w;
+        wsum += w;
+    }
+    return float4(total / wsum, 1.0);
+}
+
+float4 composite(float2 uv) {
+    float2 px = float2(ddx(uv.x), ddy(uv.y));
+    float3 c = sample_pass(paint, uv).rgb;
+    // Lit from the top left, as if brighter paint stood thicker.
+    float up = luminance(sample_pass(paint, uv - px).rgb);
+    float dn = luminance(sample_pass(paint, uv + px).rgb);
+    c += clamp((dn - up) * PaintRidge, -0.15, 0.15);
+    float g = luminance(c);
+    c = lerp(float3(g, g, g), c, PaintColour);
+    return float4(saturate(lerp(sample_input(uv).rgb, c, PaintAmount)), 1.0);
+}

@@ -1,0 +1,77 @@
+//! name: Clarity
+//! description: Local contrast and shadow detail without changing overall exposure.
+//! pass: small   scale=0.25
+//! pass: wideH   scale=0.25
+//! pass: wideV   scale=0.25
+//! pass: composite
+
+uniform float ClarityAmount : default=0.4,  min=-1.0, max=1.0, label="Clarity";
+uniform float ShadowDetail  : default=0.15, min=0.0,  max=1.0, label="Shadow detail";
+uniform float HighlightHold : default=0.1,  min=0.0,  max=1.0, label="Highlight recovery";
+uniform float HaloLimit     : default=0.8,  min=0.0,  max=1.0, label="Halo limit";
+uniform float ColourKeep    : default=0.5,  min=0.0,  max=1.0, label="Colour boost with contrast";
+
+float4 small(float2 uv) {
+    // Four bilinear taps cover all sixteen full-size pixels under this one.
+    float2 o = float2(ddx(uv.x), ddy(uv.y)) * 0.25;
+    float l = luminance(sample_input(uv + o * float2(-1.0, -1.0)).rgb) +
+              luminance(sample_input(uv + o * float2( 1.0, -1.0)).rgb) +
+              luminance(sample_input(uv + o * float2(-1.0,  1.0)).rgb) +
+              luminance(sample_input(uv + o * float2( 1.0,  1.0)).rgb);
+    l *= 0.25;
+    return float4(l, l, l, 1.0);
+}
+
+float4 wideH(float2 uv) {
+    float px = ddx(uv.x);
+    float sum = 0.0;
+    float wsum = 0.0;
+    for (int k = -8; k <= 8; ++k) {
+        float w = exp(-float(k * k) / 32.0);
+        sum += sample_pass(small, uv + float2(px * float(k), 0.0)).r * w;
+        wsum += w;
+    }
+    sum /= wsum;
+    return float4(sum, sum, sum, 1.0);
+}
+
+float4 wideV(float2 uv) {
+    float px = ddy(uv.y);
+    float sum = 0.0;
+    float wsum = 0.0;
+    for (int k = -8; k <= 8; ++k) {
+        float w = exp(-float(k * k) / 32.0);
+        sum += sample_pass(wideH, uv + float2(0.0, px * float(k))).r * w;
+        wsum += w;
+    }
+    sum /= wsum;
+    return float4(sum, sum, sum, 1.0);
+}
+
+float4 composite(float2 uv) {
+    float3 c = sample_input(uv).rgb;
+    float l = luminance(c);
+    float local = sample_pass(wideV, uv).r;
+
+    // Strongest in the midtones: pushing either end only clips it.
+    float mid = 1.0 - pow(abs(l * 2.0 - 1.0), 2.0);
+    float detail = l - local;
+    // Big differences are object outlines, and amplifying those is a halo.
+    float soft = detail / (1.0 + abs(detail) * HaloLimit * 12.0);
+    float target = l + soft * ClarityAmount * 1.2 * mid;
+
+    // Judged mostly on the surroundings, so a dark area opens up as a whole
+    // and keeps its own contrast.
+    float around = lerp(l, local, 0.6);
+    float dark = pow(1.0 - saturate(around), 4.0);
+    float light = pow(saturate(around), 4.0);
+    target += ShadowDetail * dark * sqrt(saturate(target)) * (1.0 - saturate(target)) * 0.6;
+    target -= HighlightHold * light * saturate(target) * 0.3;
+    target = saturate(target);
+
+    // Scaling keeps hue and saturation; adding keeps near-black from
+    // exploding. ColourKeep chooses between them.
+    float3 scaled = c * min(target / max(l, 0.0001), 4.0);
+    float3 added = c + (target - l);
+    return float4(saturate(lerp(added, scaled, ColourKeep)), 1.0);
+}

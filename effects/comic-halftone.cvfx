@@ -1,0 +1,53 @@
+//! name: Comic Halftone
+//! description: Printed-page dots -- four-colour screens at the classic angles.
+
+uniform float DotSize   : default=8.0,  min=3.0, max=24.0, label="Dot size";
+uniform float DotAmount : default=0.85, min=0.0, max=1.0, label="Strength";
+uniform float DotBlack  : default=0.75,  min=0.0, max=1.0, label="Black ink";
+uniform float3 PaperColor : default=(1.0,0.97,0.9), min=0.0, max=1.0, widget=color, label="Paper";
+
+// Sizes are in 1080p pixels, so a look holds at 1440p and 4K.
+float sizeScale() { return max(1.0, resolution.y / 1080.0); }
+
+float dotPx() { return DotSize * sizeScale(); }
+
+// Coverage of one ink: the picture is read at the dot's centre, and the dot
+// grows with how much ink is wanted there. Returns the RGB to read.
+float2 dotCentre(float2 p, float turn, out float dist) {
+    float s = sin(turn);
+    float c = cos(turn);
+    float2 r = float2(c * p.x + s * p.y, -s * p.x + c * p.y) / dotPx();
+    float2 cell = floor(r) + 0.5;
+    dist = length(r - cell) * dotPx();
+    float2 q = cell * dotPx();
+    return float2(c * q.x - s * q.y, s * q.x + c * q.y);
+}
+
+float4 inkAt(float2 uv) {
+    float3 cmy = 1.0 - sample_input(uv).rgb;
+    float k = min(cmy.r, min(cmy.g, cmy.b)) * DotBlack;
+    return float4(saturate((cmy - k) / max(1.0 - k, 0.01)), k);
+}
+
+float cover(float amount, float dist) {
+    // Radius whose disc fills that share of the cell; past about 0.79 the
+    // discs meet and the corners close up by the time amount reaches 1.
+    float radius = dotPx() * lerp(sqrt(amount / 3.14159), 0.75, saturate((amount - 0.7) / 0.3));
+    return smoothstep(-0.7, 0.7, radius - dist) * saturate(amount * 12.0);
+}
+
+float4 effect(float2 uv) {
+    float2 p = uv * resolution;
+    float d;
+    float2 q = dotCentre(p, 0.2618, d);
+    float cy = cover(inkAt(q / resolution).x, d);
+    q = dotCentre(p, 1.3090, d);
+    float mg = cover(inkAt(q / resolution).y, d);
+    q = dotCentre(p, 0.0, d);
+    float ye = cover(inkAt(q / resolution).z, d);
+    q = dotCentre(p, 0.7854, d);
+    float bk = cover(inkAt(q / resolution).w, d);
+
+    float3 page = PaperColor * (1.0 - float3(cy, mg, ye)) * (1.0 - bk);
+    return float4(lerp(sample_input(uv).rgb, page, DotAmount), 1.0);
+}
