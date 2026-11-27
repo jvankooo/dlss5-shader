@@ -3,3 +3,6 @@ dlss5_files/ReShade.log
 dlss5_files/ReShade.ini.bak
 dlss5_files/shaders/dlss5/dlss5-feed.log
 dlss5_files/shaders/dlss5/dlss5-feed-crash.dmp
+
+# Release assets, uploaded to GitHub releases rather than committed
+*.zip
